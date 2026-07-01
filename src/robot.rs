@@ -1,9 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crossbeam_channel::Sender;
+use rand::seq::SliceRandom;
 
-use crate::map::{Cell, Map};
-use crate::messages::RobotMessage;
+use crate::base::SharedKnownMap;
+use crate::map::{Cell, SharedMap};
+use crate::messages::{RobotKind, RobotMessage};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CollectorState {
@@ -16,8 +18,6 @@ pub enum CollectorState {
 pub struct Collector {
     pub id: usize,
     pub pos: (usize, usize),
-    /// Local knowledge: pos → Cell discovered by scouts
-    pub known_map: HashMap<(usize, usize), Cell>,
     pub cargo: u32,
     pub cargo_capacity: u32,
     pub base_pos: (usize, usize),
@@ -35,7 +35,6 @@ impl Collector {
         Self {
             id,
             pos: base_pos,
-            known_map: HashMap::new(),
             cargo: 0,
             cargo_capacity,
             base_pos,
@@ -44,15 +43,10 @@ impl Collector {
         }
     }
 
-    /// Receive a discovery from a scout and update local known_map
-    pub fn learn(&mut self, pos: (usize, usize), cell: Cell) {
-        self.known_map.insert(pos, cell);
-    }
-
     /// Manhattan-nearest known resource with quantity > 0
-    fn select_target(&self) -> Option<(usize, usize)> {
+    fn select_target(&self, known_map: &HashMap<(usize, usize), Cell>) -> Option<(usize, usize)> {
         let (cx, cy) = self.pos;
-        self.known_map
+        known_map
             .iter()
             .filter(|(_, cell)| matches!(cell, Cell::Resource(r) if r.quantity > 0))
             .min_by_key(|((x, y), _)| {
@@ -61,12 +55,13 @@ impl Collector {
             .map(|(pos, _)| *pos)
     }
 
-    /// BFS from `start` to `goal` using local known_map (unknown = passable).
-    /// Returns the path excluding `start`, or None if unreachable.
+    /// BFS from `start` to `goal` using the aggregated known map (unknown =
+    /// passable, only cells reported as `Cell::Obstacle` block the path).
     pub fn bfs_path(
         &self,
         start: (usize, usize),
         goal: (usize, usize),
+        known_map: &HashMap<(usize, usize), Cell>,
         map_width: usize,
         map_height: usize,
     ) -> Option<Vec<(usize, usize)>> {
@@ -86,8 +81,7 @@ impl Collector {
                 if visited[ny][nx] {
                     continue;
                 }
-                // Known obstacle: skip. Unknown or anything else: passable.
-                if matches!(self.known_map.get(&(nx, ny)), Some(Cell::Obstacle)) {
+                if matches!(known_map.get(&(nx, ny)), Some(Cell::Obstacle)) {
                     continue;
                 }
                 visited[ny][nx] = true;
@@ -101,17 +95,27 @@ impl Collector {
         None
     }
 
-    /// Advance one simulation tick. Mutates `map` for resource collection.
-    /// In the concurrent version this will use Arc<RwLock<Map>> + messages.
-    pub fn step(&mut self, map: &mut Map) {
+    /// Advance one simulation tick.
+    ///
+    /// `map` est la vérité terrain (verrou d'écriture pris brièvement pour
+    /// prélever une ressource) ; `known_map` est la connaissance partagée
+    /// agrégée par la Base à partir des découvertes des scouts, utilisée
+    /// pour le pathfinding.
+    pub fn step(&mut self, map: &SharedMap, known_map: &SharedKnownMap) {
+        let (map_width, map_height) = {
+            let m = map.read().unwrap_or_else(|e| e.into_inner());
+            (m.width, m.height)
+        };
+        let known_snapshot = known_map.read().unwrap_or_else(|e| e.into_inner()).clone();
+
         let state = std::mem::replace(&mut self.state, CollectorState::Idle);
 
         self.state = match state {
             CollectorState::Idle => {
                 if self.cargo >= self.cargo_capacity {
-                    self.go_home(map)
-                } else if let Some(target) = self.select_target() {
-                    match self.bfs_path(self.pos, target, map.width, map.height) {
+                    self.go_home(&known_snapshot, map_width, map_height)
+                } else if let Some(target) = self.select_target(&known_snapshot) {
+                    match self.bfs_path(self.pos, target, &known_snapshot, map_width, map_height) {
                         Some(path) => CollectorState::MovingToResource(path),
                         None => CollectorState::Idle,
                     }
@@ -122,71 +126,74 @@ impl Collector {
 
             CollectorState::MovingToResource(mut path) => {
                 if path.is_empty() {
-                    // Arrived — check resource still there
-                    match map.get(self.pos.0, self.pos.1) {
+                    let m = map.read().unwrap_or_else(|e| e.into_inner());
+                    match m.get(self.pos.0, self.pos.1) {
                         Cell::Resource(_) => CollectorState::Collecting { pos: self.pos },
                         _ => CollectorState::Idle, // resource gone, reselect next tick
                     }
                 } else {
                     self.pos = path.remove(0);
-                    let _ = self.sender.send(RobotMessage::RobotMoved {
-                        robot_id: self.id,
-                        pos: self.pos,
-                    });
+                    self.notify_moved();
                     CollectorState::MovingToResource(path)
                 }
             }
 
             CollectorState::Collecting { pos } => {
                 if self.cargo >= self.cargo_capacity {
-                    return self.state = self.go_home(map);
-                }
-                match &mut map.cells[pos.1][pos.0] {
-                    Cell::Resource(r) if r.quantity > 0 => {
-                        r.quantity -= 1;
-                        self.cargo += 1;
-                        let kind = r.kind.clone();
-                        let remaining = r.quantity;
-                        let _ = self.sender.send(RobotMessage::ResourceCollected {
-                            pos,
-                            kind,
-                            amount: 1,
-                        });
-                        if remaining == 0 {
-                            map.cells[pos.1][pos.0] = Cell::Empty;
-                            // also remove from local known_map
-                            self.known_map.remove(&pos);
-                            self.go_home(map)
-                        } else {
-                            CollectorState::Collecting { pos }
+                    self.go_home(&known_snapshot, map_width, map_height)
+                } else {
+                    let mut m = map.write().unwrap_or_else(|e| e.into_inner());
+                    match m.try_collect(pos, 1) {
+                        Some((kind, taken, remaining)) => {
+                            drop(m);
+                            self.cargo += taken;
+                            let _ = self.sender.send(RobotMessage::ResourceCollected {
+                                pos,
+                                kind,
+                                amount: taken,
+                            });
+                            if remaining == 0 {
+                                self.go_home(&known_snapshot, map_width, map_height)
+                            } else {
+                                CollectorState::Collecting { pos }
+                            }
                         }
+                        None => CollectorState::Idle, // resource exhausted by another robot
                     }
-                    _ => CollectorState::Idle, // resource exhausted by another robot
                 }
             }
 
             CollectorState::ReturningToBase(mut path) => {
                 if path.is_empty() {
-                    // Depositing at base
                     self.cargo = 0;
                     CollectorState::Idle
                 } else {
                     self.pos = path.remove(0);
-                    let _ = self.sender.send(RobotMessage::RobotMoved {
-                        robot_id: self.id,
-                        pos: self.pos,
-                    });
+                    self.notify_moved();
                     CollectorState::ReturningToBase(path)
                 }
             }
         };
     }
 
-    fn go_home(&self, map: &Map) -> CollectorState {
-        match self.bfs_path(self.pos, self.base_pos, map.width, map.height) {
+    fn go_home(
+        &self,
+        known_map: &HashMap<(usize, usize), Cell>,
+        map_width: usize,
+        map_height: usize,
+    ) -> CollectorState {
+        match self.bfs_path(self.pos, self.base_pos, known_map, map_width, map_height) {
             Some(path) => CollectorState::ReturningToBase(path),
             None => CollectorState::Idle,
         }
+    }
+
+    fn notify_moved(&self) {
+        let _ = self.sender.send(RobotMessage::RobotMoved {
+            robot_id: self.id,
+            kind: RobotKind::Collector,
+            pos: self.pos,
+        });
     }
 }
 
@@ -221,21 +228,167 @@ fn reconstruct_path(
     path
 }
 
-// ── Scout stub (P2 will implement) ───────────────────────────────────────────
+// ── Scout ─────────────────────────────────────────────────────────────────────
 
 pub struct Scout {
     pub id: usize,
     pub pos: (usize, usize),
+    /// Cases déjà signalées à la base, pour ne pas spammer le channel.
+    reported: HashSet<(usize, usize)>,
     sender: Sender<RobotMessage>,
 }
 
 impl Scout {
     pub fn new(id: usize, base_pos: (usize, usize), sender: Sender<RobotMessage>) -> Self {
-        Self { id, pos: base_pos, sender }
+        Self { id, pos: base_pos, reported: HashSet::new(), sender }
     }
 
-    /// P2 will implement random exploration logic
-    pub fn step(&mut self, _map: &Map) {
-        let _ = &self.sender;
+    /// Exploration par marche aléatoire.
+    ///
+    /// Placeholder posé par P4 (intégration) pour valider l'architecture de
+    /// bout en bout. **P2 est propriétaire de cette fonction** et peut
+    /// remplacer la stratégie (ex: frontier exploration, évitement des
+    /// zones déjà couvertes par un autre scout...) tant que la signature
+    /// `Scout::step(&mut self, map: &SharedMap)` et l'envoi des messages
+    /// `RobotMessage` restent le seul canal vers la base.
+    pub fn step(&mut self, map: &SharedMap) {
+        let m = map.read().unwrap_or_else(|e| e.into_inner());
+
+        // Perçoit les cases voisines et signale les découvertes inédites.
+        for (nx, ny) in neighbors(self.pos.0, self.pos.1, m.width, m.height) {
+            if self.reported.contains(&(nx, ny)) {
+                continue;
+            }
+            match m.get(nx, ny) {
+                Cell::Obstacle => {
+                    let _ = self.sender.send(RobotMessage::ObstacleFound { pos: (nx, ny) });
+                    self.reported.insert((nx, ny));
+                }
+                Cell::Resource(r) => {
+                    let _ = self.sender.send(RobotMessage::ResourceFound {
+                        pos: (nx, ny),
+                        kind: r.kind.clone(),
+                        quantity: r.quantity,
+                    });
+                    self.reported.insert((nx, ny));
+                }
+                _ => {}
+            }
+        }
+
+        // Se déplace vers un voisin passable choisi au hasard.
+        let passable: Vec<(usize, usize)> = neighbors(self.pos.0, self.pos.1, m.width, m.height)
+            .filter(|(x, y)| m.is_passable(*x, *y))
+            .collect();
+        drop(m);
+
+        if let Some(&next) = passable.choose(&mut rand::thread_rng()) {
+            self.pos = next;
+            let _ = self.sender.send(RobotMessage::RobotMoved {
+                robot_id: self.id,
+                kind: RobotKind::Scout,
+                pos: self.pos,
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map::{Map, Resource, ResourceKind};
+    use crossbeam_channel::unbounded;
+    use std::sync::{Arc, RwLock};
+
+    fn empty_known_map() -> HashMap<(usize, usize), Cell> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn bfs_finds_direct_path_with_no_known_obstacles() {
+        let (tx, _rx) = unbounded();
+        let collector = Collector::new(0, (0, 0), 10, tx);
+        let path = collector
+            .bfs_path((0, 0), (2, 0), &empty_known_map(), 5, 5)
+            .unwrap();
+        assert_eq!(path, vec![(1, 0), (2, 0)]);
+    }
+
+    #[test]
+    fn bfs_routes_around_known_obstacle() {
+        let (tx, _rx) = unbounded();
+        let collector = Collector::new(0, (0, 0), 10, tx);
+        let mut known = empty_known_map();
+        known.insert((1, 0), Cell::Obstacle);
+
+        let path = collector.bfs_path((0, 0), (2, 0), &known, 5, 5).unwrap();
+        assert!(!path.contains(&(1, 0)));
+        assert_eq!(*path.last().unwrap(), (2, 0));
+    }
+
+    #[test]
+    fn bfs_returns_none_when_goal_is_walled_off() {
+        let (tx, _rx) = unbounded();
+        let collector = Collector::new(0, (0, 0), 10, tx);
+        let mut known = empty_known_map();
+        // Enferme (1,1) derrière des murs connus.
+        known.insert((0, 1), Cell::Obstacle);
+        known.insert((1, 0), Cell::Obstacle);
+        known.insert((2, 1), Cell::Obstacle);
+        known.insert((1, 2), Cell::Obstacle);
+
+        assert!(collector.bfs_path((0, 0), (1, 1), &known, 3, 3).is_none());
+    }
+
+    #[test]
+    fn collector_full_cycle_moves_collects_and_returns() {
+        let mut map = Map::new(5, 5);
+        map.cells[0][1] = Cell::Resource(Resource { kind: ResourceKind::Energy, quantity: 1 });
+        let base_pos = map.base_pos;
+        let shared_map: SharedMap = Arc::new(RwLock::new(map));
+        let known_map: SharedKnownMap = Arc::new(RwLock::new(HashMap::new()));
+        known_map.write().unwrap().insert(
+            (1, 0),
+            Cell::Resource(Resource { kind: ResourceKind::Energy, quantity: 1 }),
+        );
+
+        let (tx, rx) = unbounded();
+        let mut collector = Collector::new(0, base_pos, 5, tx);
+        collector.pos = (0, 0);
+
+        // Idle -> MovingToResource -> ... -> Collecting -> ReturningToBase -> Idle
+        for _ in 0..20 {
+            collector.step(&shared_map, &known_map);
+            if collector.state == CollectorState::Idle && collector.pos == base_pos && collector.cargo == 0 {
+                break;
+            }
+        }
+
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, RobotMessage::ResourceCollected { amount: 1, .. })));
+        assert!(matches!(shared_map.read().unwrap().get(1, 0), Cell::Empty));
+    }
+
+    #[test]
+    fn scout_reports_neighboring_resource_and_moves() {
+        let mut map = Map::new(5, 5);
+        map.cells[0][1] = Cell::Resource(Resource { kind: ResourceKind::Crystal, quantity: 4 });
+        let base_pos = map.base_pos;
+        let shared_map: SharedMap = Arc::new(RwLock::new(map));
+
+        let (tx, rx) = unbounded();
+        let mut scout = Scout::new(0, base_pos, tx);
+        scout.pos = (0, 0);
+
+        scout.step(&shared_map);
+
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            RobotMessage::ResourceFound { pos: (1, 0), kind: ResourceKind::Crystal, quantity: 4 }
+        )));
+        assert!(messages.iter().any(|m| matches!(m, RobotMessage::RobotMoved { .. })));
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -13,6 +15,9 @@ pub struct UiState {
     pub crystals: u32,
     pub robot_positions: Vec<(usize, usize, bool)>, // (x, y, is_collector)
 }
+
+/// Écrit par le thread Base (agrégation), lu par le thread de rendu.
+pub type SharedUi = Arc<Mutex<UiState>>;
 
 impl Default for UiState {
     fn default() -> Self {

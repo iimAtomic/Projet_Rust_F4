@@ -1,14 +1,20 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::io;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
 use std::time::Duration;
 
+use crossbeam_channel::unbounded;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{backend::CrosstermBackend, Terminal};
 
 mod base;
 mod map;
@@ -16,32 +22,111 @@ mod messages;
 mod robot;
 mod ui;
 
+use base::Base;
+use map::Map;
+use robot::{Collector, Scout};
+use ui::UiState;
+
+const MAP_WIDTH: usize = 60;
+const MAP_HEIGHT: usize = 25;
+const SCOUT_COUNT: usize = 2;
+const COLLECTOR_COUNT: usize = 2;
+const COLLECTOR_CAPACITY: u32 = 5;
+const ROBOT_TICK: Duration = Duration::from_millis(150);
+
 fn main() -> io::Result<()> {
+    // Le terminal est mis en mode brut/alternatif ici ; il DOIT être restauré
+    // même si `run` panique (un panic dans un thread robot ne doit jamais
+    // laisser le terminal de l'utilisateur cassé après un crash).
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let map = map::Map::new(60, 25);
-    let ui_state = ui::UiState::default();
-
-    let result = run(&mut terminal, map, ui_state);
+    let result = catch_unwind(AssertUnwindSafe(|| run(&mut terminal)));
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    result
+    match result {
+        Ok(inner) => inner,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
-fn run(
+fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    let shared_map = Map::new_shared(MAP_WIDTH, MAP_HEIGHT);
+    let base_pos = shared_map.read().unwrap().base_pos;
+
+    let known_map: base::SharedKnownMap = Arc::new(RwLock::new(HashMap::new()));
+    let shared_ui: ui::SharedUi = Arc::new(Mutex::new(UiState::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let (tx, rx) = unbounded::<messages::RobotMessage>();
+
+    let base = Base::new(base_pos, rx, known_map.clone(), shared_ui.clone());
+    let base_stop = stop.clone();
+    let base_handle = thread::spawn(move || base.run(base_stop));
+
+    let mut robot_handles = Vec::new();
+
+    for id in 0..SCOUT_COUNT {
+        let mut scout = Scout::new(id, base_pos, tx.clone());
+        let map = shared_map.clone();
+        let stop = stop.clone();
+        robot_handles.push(thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                scout.step(&map);
+                thread::sleep(ROBOT_TICK);
+            }
+        }));
+    }
+
+    for id in 0..COLLECTOR_COUNT {
+        let mut collector = Collector::new(id, base_pos, COLLECTOR_CAPACITY, tx.clone());
+        let map = shared_map.clone();
+        let known_map = known_map.clone();
+        let stop = stop.clone();
+        robot_handles.push(thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                collector.step(&map, &known_map);
+                thread::sleep(ROBOT_TICK);
+            }
+        }));
+    }
+
+    // Le sender original doit être fermé pour que le channel puisse un jour
+    // se vider complètement (les clones détenus par les robots suffisent
+    // tant qu'ils tournent, mais on ne veut pas garder de sender orphelin).
+    drop(tx);
+
+    let render_result = render_loop(terminal, &shared_map, &shared_ui, &stop);
+
+    // Signale l'arrêt à tous les threads robots + base puis attend leur fin
+    // avant de restaurer le terminal, pour ne perdre aucun message en vol.
+    stop.store(true, Ordering::Relaxed);
+    for handle in robot_handles {
+        let _ = handle.join();
+    }
+    let _ = base_handle.join();
+
+    render_result
+}
+
+fn render_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    map: map::Map,
-    mut ui_state: ui::UiState,
+    shared_map: &map::SharedMap,
+    shared_ui: &ui::SharedUi,
+    stop: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     loop {
-        terminal.draw(|f| ui::render(f, &map, &ui_state))?;
+        {
+            let map = shared_map.read().unwrap_or_else(|e| e.into_inner());
+            let ui_state = shared_ui.lock().unwrap_or_else(|e| e.into_inner());
+            terminal.draw(|f| ui::render(f, &map, &ui_state))?;
+        }
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -52,8 +137,9 @@ fn run(
             }
         }
 
-        // Sprint 3: robot threads will update ui_state via Arc<Mutex<UiState>>
-        let _ = &mut ui_state;
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
     }
     Ok(())
 }
