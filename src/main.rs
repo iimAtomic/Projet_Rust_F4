@@ -35,9 +35,6 @@ const COLLECTOR_CAPACITY: u32 = 5;
 const ROBOT_TICK: Duration = Duration::from_millis(150);
 
 fn main() -> io::Result<()> {
-    // Le terminal est mis en mode brut/alternatif ici ; il DOIT être restauré
-    // même si `run` panique (un panic dans un thread robot ne doit jamais
-    // laisser le terminal de l'utilisateur cassé après un crash).
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -97,15 +94,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         }));
     }
 
-    // Le sender original doit être fermé pour que le channel puisse un jour
-    // se vider complètement (les clones détenus par les robots suffisent
-    // tant qu'ils tournent, mais on ne veut pas garder de sender orphelin).
     drop(tx);
 
     let render_result = render_loop(terminal, &shared_map, &shared_ui, &stop);
 
-    // Signale l'arrêt à tous les threads robots + base puis attend leur fin
-    // avant de restaurer le terminal, pour ne perdre aucun message en vol.
     stop.store(true, Ordering::Relaxed);
     for handle in robot_handles {
         let _ = handle.join();

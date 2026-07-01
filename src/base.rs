@@ -9,13 +9,8 @@ use crate::map::{Cell, ResourceKind};
 use crate::messages::{RobotKind, RobotMessage};
 use crate::ui::SharedUi;
 
-/// Connaissance agrégée de la carte, construite à partir des messages des
-/// robots. Lue par les collecteurs pour le pathfinding, donc partagée.
 pub type SharedKnownMap = Arc<RwLock<HashMap<(usize, usize), Cell>>>;
 
-/// Le thread Base est le seul consommateur du channel : c'est lui qui
-/// agrège l'état global (carte connue, compteurs, positions) à partir des
-/// messages envoyés par les threads Scout et Collector.
 pub struct Base {
     pub pos: (usize, usize),
     pub energy_collected: u32,
@@ -44,8 +39,6 @@ impl Base {
         }
     }
 
-    /// Drain tous les messages en attente et met à jour l'état global.
-    /// Ne bloque jamais : utilisé par `run` et par les tests.
     pub fn process_messages(&mut self) {
         while let Ok(msg) = self.receiver.try_recv() {
             self.handle(msg);
@@ -69,8 +62,7 @@ impl Base {
                     ResourceKind::Energy => self.energy_collected += amount,
                     ResourceKind::Crystal => self.crystals_collected += amount,
                 }
-                // La connaissance globale doit refléter la ressource restante,
-                // sinon les collecteurs continuent de cibler une case épuisée.
+
                 self.with_known_map(|map| {
                     if let Some(Cell::Resource(r)) = map.get_mut(&pos) {
                         r.quantity = r.quantity.saturating_sub(amount);
@@ -91,8 +83,6 @@ impl Base {
         f(&mut map);
     }
 
-    /// Republie l'état agrégé (compteurs + positions) dans `UiState` pour
-    /// que le thread de rendu n'ait qu'à lire une seule structure.
     fn sync_ui(&self) {
         let mut ui = self.ui.lock().unwrap_or_else(|e| e.into_inner());
         ui.energy = self.energy_collected;
@@ -104,10 +94,6 @@ impl Base {
             .collect();
     }
 
-    /// Boucle principale du thread Base : attend des messages (avec
-    /// timeout pour rester réactive au drapeau d'arrêt), agrège l'état, et
-    /// republie vers l'UI. S'arrête proprement quand `stop` est levé et que
-    /// le channel est vide.
     pub fn run(mut self, stop: Arc<AtomicBool>) {
         loop {
             match self.receiver.recv_timeout(Duration::from_millis(50)) {

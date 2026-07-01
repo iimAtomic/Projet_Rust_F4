@@ -30,20 +30,10 @@ pub struct Map {
     pub base_pos: (usize, usize),
 }
 
-/// La carte est partagée en lecture par tous les robots (pathfinding,
-/// rendu) et en écriture par les collecteurs (prélèvement de ressource).
-/// `RwLock` autorise plusieurs lecteurs concurrents ou un seul écrivain.
 pub type SharedMap = Arc<RwLock<Map>>;
 
 impl Map {
-    /// Génération de carte par bruit de Perlin.
-    ///
-    /// Placeholder posé par P4 (intégration) pour que le reste de
-    /// l'architecture (threads, BFS, UI) soit démontrable de bout en bout.
-    /// **P1 est propriétaire de cette fonction** et peut librement changer
-    /// l'algorithme de génération (seeds, biomes, densité de ressources...)
-    /// tant que la signature `Map::new(width, height) -> Self` et les champs
-    /// publics (`width`, `height`, `cells`, `base_pos`) restent compatibles.
+
     pub fn new(width: usize, height: usize) -> Self {
         let base_pos = (width / 2, height / 2);
         let perlin = Perlin::new(rand::thread_rng().r#gen());
@@ -78,7 +68,6 @@ impl Map {
         Self { width, height, cells, base_pos }
     }
 
-    /// Wrappe une carte fraîchement générée dans le type partagé thread-safe.
     pub fn new_shared(width: usize, height: usize) -> SharedMap {
         Arc::new(RwLock::new(Self::new(width, height)))
     }
@@ -91,10 +80,6 @@ impl Map {
         !matches!(self.get(x, y), Cell::Obstacle)
     }
 
-    /// Prélève atomiquement jusqu'à `amount` unités de ressource à `pos`.
-    /// Retourne `Some((kind, prelevé, quantité_restante))` si une ressource
-    /// était présente, `None` sinon (déjà épuisée par un autre collecteur,
-    /// ou case sans ressource). Doit être appelé sous verrou d'écriture.
     pub fn try_collect(&mut self, pos: (usize, usize), amount: u32) -> Option<(ResourceKind, u32, u32)> {
         match &mut self.cells[pos.1][pos.0] {
             Cell::Resource(r) if r.quantity > 0 => {

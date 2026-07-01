@@ -43,7 +43,6 @@ impl Collector {
         }
     }
 
-    /// Manhattan-nearest known resource with quantity > 0
     fn select_target(&self, known_map: &HashMap<(usize, usize), Cell>) -> Option<(usize, usize)> {
         let (cx, cy) = self.pos;
         known_map
@@ -55,8 +54,6 @@ impl Collector {
             .map(|(pos, _)| *pos)
     }
 
-    /// BFS from `start` to `goal` using the aggregated known map (unknown =
-    /// passable, only cells reported as `Cell::Obstacle` block the path).
     pub fn bfs_path(
         &self,
         start: (usize, usize),
@@ -95,12 +92,6 @@ impl Collector {
         None
     }
 
-    /// Advance one simulation tick.
-    ///
-    /// `map` est la vérité terrain (verrou d'écriture pris brièvement pour
-    /// prélever une ressource) ; `known_map` est la connaissance partagée
-    /// agrégée par la Base à partir des découvertes des scouts, utilisée
-    /// pour le pathfinding.
     pub fn step(&mut self, map: &SharedMap, known_map: &SharedKnownMap) {
         let (map_width, map_height) = {
             let m = map.read().unwrap_or_else(|e| e.into_inner());
@@ -197,8 +188,6 @@ impl Collector {
     }
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
 fn neighbors(
     x: usize,
     y: usize,
@@ -228,12 +217,9 @@ fn reconstruct_path(
     path
 }
 
-// ── Scout ─────────────────────────────────────────────────────────────────────
-
 pub struct Scout {
     pub id: usize,
     pub pos: (usize, usize),
-    /// Cases déjà signalées à la base, pour ne pas spammer le channel.
     reported: HashSet<(usize, usize)>,
     sender: Sender<RobotMessage>,
 }
@@ -243,18 +229,9 @@ impl Scout {
         Self { id, pos: base_pos, reported: HashSet::new(), sender }
     }
 
-    /// Exploration par marche aléatoire.
-    ///
-    /// Placeholder posé par P4 (intégration) pour valider l'architecture de
-    /// bout en bout. **P2 est propriétaire de cette fonction** et peut
-    /// remplacer la stratégie (ex: frontier exploration, évitement des
-    /// zones déjà couvertes par un autre scout...) tant que la signature
-    /// `Scout::step(&mut self, map: &SharedMap)` et l'envoi des messages
-    /// `RobotMessage` restent le seul canal vers la base.
     pub fn step(&mut self, map: &SharedMap) {
         let m = map.read().unwrap_or_else(|e| e.into_inner());
 
-        // Perçoit les cases voisines et signale les découvertes inédites.
         for (nx, ny) in neighbors(self.pos.0, self.pos.1, m.width, m.height) {
             if self.reported.contains(&(nx, ny)) {
                 continue;
@@ -331,7 +308,6 @@ mod tests {
         let (tx, _rx) = unbounded();
         let collector = Collector::new(0, (0, 0), 10, tx);
         let mut known = empty_known_map();
-        // Enferme (1,1) derrière des murs connus.
         known.insert((0, 1), Cell::Obstacle);
         known.insert((1, 0), Cell::Obstacle);
         known.insert((2, 1), Cell::Obstacle);
@@ -356,7 +332,6 @@ mod tests {
         let mut collector = Collector::new(0, base_pos, 5, tx);
         collector.pos = (0, 0);
 
-        // Idle -> MovingToResource -> ... -> Collecting -> ReturningToBase -> Idle
         for _ in 0..20 {
             collector.step(&shared_map, &known_map);
             if collector.state == CollectorState::Idle && collector.pos == base_pos && collector.cargo == 0 {
