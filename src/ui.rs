@@ -76,20 +76,7 @@ fn render_map(
                 continue;
             }
 
-            let (ch, color) = if (x, y) == map.base_pos {
-                ('#', Color::LightGreen)
-            } else {
-                match known_map.get(&(x, y)) {
-                    Some(Cell::Empty) => ('.', Color::DarkGray),
-                    Some(Cell::Obstacle) => ('O', Color::LightCyan),
-                    Some(Cell::Resource(resource)) => match resource.kind {
-                        ResourceKind::Energy => ('E', Color::Green),
-                        ResourceKind::Crystal => ('C', Color::LightMagenta),
-                    },
-                    Some(Cell::Base) => ('#', Color::LightGreen),
-                    None => ('?', Color::DarkGray),
-                }
-            };
+            let (ch, color) = cell_symbol((x, y), map.base_pos, known_map.get(&(x, y)));
 
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
@@ -162,4 +149,54 @@ fn render_panel(frame: &mut Frame, state: &UiState, area: ratatui::layout::Rect)
     ];
 
     frame.render_widget(Paragraph::new(text), inner);
+}
+
+fn cell_symbol(
+    pos: (usize, usize),
+    base_pos: (usize, usize),
+    known_cell: Option<&Cell>,
+) -> (char, Color) {
+    if pos == base_pos {
+        return ('#', Color::LightGreen);
+    }
+
+    match known_cell {
+        Some(Cell::Empty) => ('.', Color::DarkGray),
+        Some(Cell::Obstacle) => ('O', Color::LightCyan),
+        Some(Cell::Resource(resource)) => match resource.kind {
+            ResourceKind::Energy => ('E', Color::Green),
+            ResourceKind::Crystal => ('C', Color::LightMagenta),
+        },
+        Some(Cell::Base) => ('#', Color::LightGreen),
+        None => ('?', Color::DarkGray),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map::{Resource, ResourceKind};
+
+    #[test]
+    fn unknown_cell_uses_question_mark() {
+        assert_eq!(cell_symbol((0, 0), (1, 1), None), ('?', Color::DarkGray));
+    }
+
+    #[test]
+    fn base_is_visible_even_if_unknown() {
+        assert_eq!(cell_symbol((1, 1), (1, 1), None), ('#', Color::LightGreen));
+    }
+
+    #[test]
+    fn known_crystal_uses_required_symbol_and_color() {
+        let cell = Cell::Resource(Resource {
+            kind: ResourceKind::Crystal,
+            quantity: 80,
+        });
+
+        assert_eq!(
+            cell_symbol((2, 2), (1, 1), Some(&cell)),
+            ('C', Color::LightMagenta)
+        );
+    }
 }
