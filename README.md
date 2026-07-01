@@ -18,6 +18,17 @@ Appuyez sur n'importe quelle touche pour quitter.
 - Fog of war: seules les cases connues via `known_map` sont affichees, les autres restent `?`.
 - Message `Simulation terminee` quand toutes les ressources sont epuisees.
 
+## Tests utiles
+
+```bash
+cargo fmt --check
+cargo test
+cargo run
+```
+
+`cargo test` verifie notamment la generation de carte, les quantites de
+ressources et les symboles utilises par l'affichage.
+
 ## Couleurs
 
 - `O`: obstacle, cyan clair.
