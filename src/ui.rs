@@ -43,7 +43,7 @@ pub fn render(
         .split(frame.area());
 
     render_map(frame, map, known_map, state, chunks[0]);
-    render_panel(frame, state, chunks[1]);
+    render_panel(frame, state, known_map.len(), chunks[1]);
 }
 
 fn render_map(
@@ -86,7 +86,12 @@ fn render_map(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_panel(frame: &mut Frame, state: &UiState, area: ratatui::layout::Rect) {
+fn render_panel(
+    frame: &mut Frame,
+    state: &UiState,
+    discovered_cells: usize,
+    area: ratatui::layout::Rect,
+) {
     let block = Block::default().title(" Stats ").borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -113,6 +118,10 @@ fn render_panel(frame: &mut Frame, state: &UiState, area: ratatui::layout::Rect)
         Line::from(Span::styled(
             format!("Crystals: {}", state.crystals),
             Style::default().fg(Color::LightMagenta),
+        )),
+        Line::from(Span::styled(
+            format!("Known:    {}", discovered_cells),
+            Style::default().fg(Color::White),
         )),
         Line::from(""),
         status,
