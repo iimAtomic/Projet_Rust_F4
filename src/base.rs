@@ -55,6 +55,11 @@ impl Base {
                     map.insert(pos, Cell::Obstacle);
                 });
             }
+            RobotMessage::CellSeen { pos, cell } => {
+                self.with_known_map(|map| {
+                    map.insert(pos, cell);
+                });
+            }
             RobotMessage::ResourceCollected { pos, kind, amount } => {
                 match kind {
                     ResourceKind::Energy => self.energy_collected += amount,

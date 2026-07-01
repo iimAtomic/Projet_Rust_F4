@@ -1,4 +1,4 @@
-use crate::map::ResourceKind;
+use crate::map::{Cell, ResourceKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RobotKind {
@@ -15,6 +15,10 @@ pub enum RobotMessage {
     },
     ObstacleFound {
         pos: (usize, usize),
+    },
+    CellSeen {
+        pos: (usize, usize),
+        cell: Cell,
     },
     ResourceCollected {
         pos: (usize, usize),

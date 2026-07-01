@@ -221,7 +221,13 @@ impl Scout {
                     });
                     self.reported.insert((nx, ny));
                 }
-                _ => {}
+                Cell::Empty | Cell::Base => {
+                    let _ = self.sender.send(RobotMessage::CellSeen {
+                        pos: (nx, ny),
+                        cell: map.get(nx, ny).clone(),
+                    });
+                    self.reported.insert((nx, ny));
+                }
             }
         }
 
