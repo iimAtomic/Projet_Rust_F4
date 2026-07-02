@@ -137,10 +137,10 @@ fn render_loop(
             terminal.draw(|frame| ui::render(frame, &map, &known_snapshot, &ui_state))?;
         }
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(_) = event::read()? {
-                break;
-            }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(_) = event::read()?
+        {
+            break;
         }
 
         if stop.load(Ordering::Relaxed) && !simulation_finished {

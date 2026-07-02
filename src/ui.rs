@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::map::{Cell, Map, ResourceKind};
 
+#[derive(Default)]
 pub struct UiState {
     pub energy: u32,
     pub crystals: u32,
@@ -19,17 +20,6 @@ pub struct UiState {
 }
 
 pub type SharedUi = Arc<Mutex<UiState>>;
-
-impl Default for UiState {
-    fn default() -> Self {
-        Self {
-            energy: 0,
-            crystals: 0,
-            simulation_finished: false,
-            robot_positions: vec![],
-        }
-    }
-}
 
 pub fn render(
     frame: &mut Frame,

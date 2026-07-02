@@ -46,15 +46,15 @@ impl Map {
         let mut rng = rand::thread_rng();
 
         let mut cells = vec![vec![Cell::Empty; width]; height];
-        for y in 0..height {
-            for x in 0..width {
+        for (y, row) in cells.iter_mut().enumerate() {
+            for (x, cell) in row.iter_mut().enumerate() {
                 if distance_from_base((x, y), base_pos) <= BASE_CLEAR_RADIUS {
                     continue;
                 }
 
                 let n = perlin.get([x as f64 * OBSTACLE_SCALE, y as f64 * OBSTACLE_SCALE]);
                 if n > OBSTACLE_THRESHOLD {
-                    cells[y][x] = Cell::Obstacle;
+                    *cell = Cell::Obstacle;
                 }
             }
         }
@@ -87,13 +87,15 @@ impl Map {
             placed += 1;
         }
 
-        if placed == 0 && width > 0 && height > 0 {
-            if let Some((x, y)) = find_first_empty(&cells, base_pos) {
-                cells[y][x] = Cell::Resource(Resource {
-                    kind: ResourceKind::Energy,
-                    quantity: rng.gen_range(MIN_RESOURCE_QUANTITY..=MAX_RESOURCE_QUANTITY),
-                });
-            }
+        if placed == 0
+            && width > 0
+            && height > 0
+            && let Some((x, y)) = find_first_empty(&cells, base_pos)
+        {
+            cells[y][x] = Cell::Resource(Resource {
+                kind: ResourceKind::Energy,
+                quantity: rng.gen_range(MIN_RESOURCE_QUANTITY..=MAX_RESOURCE_QUANTITY),
+            });
         }
 
         cells[base_pos.1][base_pos.0] = Cell::Base;
